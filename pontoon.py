@@ -20,6 +20,10 @@ SURRENDER = 5
 
 dp = {}
 
+basic_strategy_hard = [[{} for i in range(22)] for i in range(11)]
+basic_strategy_soft = [[{} for i in range(22)] for i in range(11)]
+basic_strategy_split = [[{} for i in range(11)] for i in range(11)]
+
 class Hand(object):
     def __init__(self, card, splits_remaining = 1, was_split = False):
         self.trick_possible = (card % 10) in [6, 7, 8]
@@ -51,6 +55,8 @@ class Hand(object):
         return self.score != 21 and not self.busted and not self.doubled and (self.was_split != SPLIT_ACES or self.n_cards != 2)
 
     def hit(self, card):
+        assert(int(card) == card)
+        card = int(card)
         self = self.copy()
         self.trick_possible = self.trick_possible and (card % 10) in [6, 7, 8] and self.n_cards <= 3
         self.suitb = card / 10
@@ -76,12 +82,16 @@ class Hand(object):
         return self.n_cards > 1 and self.score >= 9 and self.score <= 11 and self.doubled == False 
 
     def double(self, card):
+        assert(int(card) == card)
+        assert(self.score >= 9 and self.score <= 11)
+        self.can_split = False
+        card = int(card)
         self = self.copy()
         self.trick_possible = False
         self.suit = None
         self.n_cards += 1
         self.score += (card-1)%10+1
-        if card == 1:
+        if card == 1 and self.score <= 11:
             self.score += 10
         if self.soft: # doubling on soft hands count ace as 1
             self.score -= 10
@@ -110,6 +120,7 @@ class Hand(object):
         return self.busted
 
     def split(self):
+        assert(self.score % 2 == 0)
         hand = self.score / 2
         if self.soft:
             hand = 1
@@ -172,12 +183,12 @@ class Hand(object):
     def __str__(self):
         return repr(self.serialize())
 
-cards = [(1, (1.)*(1)/12), (2, (1.)*(1)/12), (3, (1.)*(1)/12), (4, (1.)*(1)/12), (5, (1.)*(1)/12), 
-        (6, (1.)*(1)/48), ((1.)*(1), (1.)*(1)/48), (26, (1.)*(1)/48), (36, (1.)*(1)/48), 
-        (7, (1.)*(1)/48), ((1.)*(1), (1.)*(1)/48), (27, (1.)*(1)/48), (37, (1.)*(1)/48), 
-        (8, (1.)*(1)/48), ((1.)*(1), (1.)*(1)/48), (28, (1.)*(1)/48), (38, (1.)*(1)/48), 
+cards = [(1, (1.)*(1)/12), (2, (1.)*(1.)/12), (3, (1.)*(1.)/12), (4, (1.)*(1.)/12), (5, (1.)*(1)/12), 
+        (6, (1.)*(1)/48), (16, (1.)*(1)/48), (26, (1.)*(1)/48), (36, (1.)*(1)/48), 
+        (7, (1.)*(1)/48), (17, (1.)*(1)/48), (27, (1.)*(1)/48), (37, (1.)*(1)/48), 
+        (8, (1.)*(1)/48), (18, (1.)*(1)/48), (28, (1.)*(1)/48), (38, (1.)*(1)/48), 
         (9, (1.)*(1)/12), (10, (1.)*(3)/12)]
-ranks = [(1, (1.)*(1)/12), (2, (1.)*(1)/12), (3, (1.)*(1)/12), (4, (1.)*(1)/12), (5, (1.)*(1)/12), 
+ranks = [(1, (1.)*(1)/12), (2, (1.)*(1.)/12), (3, (1.)*(1.)/12), (4, (1.)*(1.)/12), (5, (1.)*(1)/12), 
         (6, (1.)*(1)/12), (7, (1.)*(1)/12), (8, (1.)*(1)/12), (9, (1.)*(1)/12), (10, (1.)*(3)/12)]
 
 def showdown(dealer_card, hands, dp):
@@ -354,8 +365,31 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                     newhand = hands[hand_i].surrender()
                     ev = get_edge(dealer_card, hands[:hand_i] + [newhand] + hands[hand_i+1:], hand_i + 1, mydp)[0]
                     best = max(best, (ev, SURRENDER))
+                s = []
+                if hands[hand_i].can_hit():
+                    if hands[hand_i].soft:
+                        s.append(basic_strategy_soft[dealer_card][hands[hand_i].get_score()])
+                    if hands[hand_i].can_split:
+                        s.append(basic_strategy_split[dealer_card][hands[hand_i].get_score()/2 if not hands[hand_i].soft else 1])
+                    if not hands[hand_i].soft and best[1] != SPLIT and best[1] != SPLIT_FREE:
+                        s.append(basic_strategy_hard[dealer_card][hands[hand_i].get_score()])
+                    for i in s:
+                        i[best[1]] = i.get(best[1], 0) + 1
+
             dp[key] = best
     return dp[key]
+
+def print_chart(chart, name, rng):
+    print name, "________________"
+    for i in ["____"] + range(2, 11) + ["A"]:
+        print i, "\t",
+    print
+    for i in rng:
+        print i, "\t",
+        for j in range(2, 11) + [1]:
+            print ",".join(map(str,chart[j][i].keys())), "\t",
+        print
+    print
 
 if __name__ == "__main__":
     print "computing best plays and displaying borderline cases"
@@ -369,6 +403,10 @@ if __name__ == "__main__":
                     print hole, (c1-1)%10+1 + (c2-1)%10+1 + (10 if c1 == 1 or c2 == 1 else 0), c1, c2, ["stand", "hit", "double", "split", "splat", "surrender"][ev[1]], ev[0], c1/10, c2/10
         print "Done for hole card", hole
     print "Done. Total ev:", totev
+
+    print_chart(basic_strategy_hard, "Hard", range(8, 21))
+    print_chart(basic_strategy_soft, "Soft", range(11, 21))
+    print_chart(basic_strategy_split, "Splits", range(2, 11) + [1])
 
     cardA = int(raw_input("first player card:"))
     h = Hand(cardA)
