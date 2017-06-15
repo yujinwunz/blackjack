@@ -9,10 +9,6 @@ OBO = False
 OBBO = False
 BB1 = False
 ENHC = True
-DEALER_STAND = 2
-
-HIT_SOFT17 = False
-EARLY_SURRENDER = False
 
 NO_ACTION = -1
 STAND = 0
@@ -29,12 +25,15 @@ basic_strategy_soft = [[{} for i in range(22)] for i in range(11)]
 basic_strategy_split = [[{} for i in range(11)] for i in range(11)]
 
 class Hand(object):
-    def __init__(self, card, splits_remaining = 2, was_split = False):
+    def __init__(self, card, splits_remaining = 1, was_split = False):
+        self.trick_possible = (card % 10) in [6, 7, 8]
+        self.suita = card / 10
+        self.suitb = None
         self.score = (card-1)%10 + 1
         self.soft = card == 1
         self.score += 10 * self.soft
         self.busted = False
-        self.doubled = False
+        self.doubled = 0
         self.n_cards = 1
         self.can_split = False
         self.splits_remaining = splits_remaining
@@ -43,7 +42,7 @@ class Hand(object):
 
     def copy(self):
         h = Hand(0)
-        h.score, h.soft, h.busted, h.doubled, h.n_cards, h.can_split, h.splits_remaining, h.surrendered, h.was_split = self.serialize() 
+        h.trick_possible, h.suita, h.suitb, h.score, h.soft, h.busted, h.doubled, h.n_cards, h.can_split, h.splits_remaining, h.surrendered, h.was_split = self.serialize() 
         return h
 
     def can_stand(self):
@@ -53,12 +52,14 @@ class Hand(object):
         return True
 
     def can_hit(self):
-        return self.score != 21 and not self.busted and (not self.doubled or True) and (self.was_split != SPLIT_ACES or self.n_cards != 2)
+        return self.score != 21 and not self.busted and (self.was_split != SPLIT_ACES or self.n_cards != 2)
 
     def hit(self, card):
         assert(int(card) == card)
         card = int(card)
         self = self.copy()
+        self.trick_possible = self.trick_possible and (card % 10) in [6, 7, 8] and self.n_cards <= 3
+        self.suitb = card / 10
         if ((card-1)%10 + 1 == self.score or (card == 1 and self.score == 11)) and self.n_cards == 1 and self.splits_remaining > 0:
             self.can_split = True
         else:
@@ -78,25 +79,26 @@ class Hand(object):
 
     def can_double(self):
         # Must have at least 2 cards. 1 card is possible after splitting.
-        return self.n_cards == 2 and self.doubled == False and self.score != 21 
+        return self.n_cards > 1 and not self.busted
 
     def double(self, card):
         assert(int(card) == card)
-        self = self.copy()
         self.can_split = False
         card = int(card)
         self = self.copy()
+        self.trick_possible = False
+        self.suit = None
         self.n_cards += 1
         self.score += (card-1)%10+1
         if card == 1 and self.score <= 11:
             self.score += 10
-            self.soft = True
-        if self.score > 21 and self.soft:
-            self.soft = False
-            self.score -= 10
         if self.score > 21:
-            self.busted = True
-        self.doubled = True
+            if self.soft:
+                self.score -= 10
+                self.soft = False
+            else:
+                self.busted = True
+        self.doubled += 1
         return self
 
     def surrender(self):
@@ -105,10 +107,12 @@ class Hand(object):
         return self
 
     def can_surrender(self, dealer_card):
-        return False
-        if self.n_cards == 2 and self.was_split == False and dealer_card != 1:
-            return True
-        return False
+        return True
+        if dealer_card != 10 and dealer_card != 1 and not self.doubled:
+            return False 
+        if self.was_split == SPLIT_ACES and self.n_cards == 2: # can't surrender split aces
+            return False
+        return self.score != 21 and (self.n_cards == 2 or self.doubled)
 
     def has_surrendered(self):
         return self.surrendered
@@ -124,18 +128,38 @@ class Hand(object):
         hand = self.score / 2
         if self.soft:
             hand = 1
+        if hand >= 6 and hand <= 8:
+            # splitting 6, 7, 8. Suit matters
+            return (Hand(hand + self.suita*10, self.splits_remaining-1, True), 
+                    Hand(hand + self.suitb*10, self.splits_remaining-1, True))
         return (Hand(hand, self.splits_remaining - 1, True), Hand(hand, self.splits_remaining-1, True))
 
-    def is_blackjack(self):
-        if self.n_cards == 2 and not self.was_split and self.score == 21:
-            return True
-        return False
+    def payout_21(self):
+        assert(self.score == 21)
+        if self.n_cards == 2 and not self.was_split:
+            return (1.)*(5) / 2
+        if self.doubled == True:
+            return 4
+        if self.trick_possible:
+            if self.suita == self.suitb == SPADE:
+                return 4
+            if self.suita == self.suitb:
+                return 3
+            else:
+                return (1.)*(5) / 2
+        if self.n_cards >= 7:
+            return 4
+        if self.n_cards == 6:
+            return 3
+        if self.n_cards == 5:
+            return (1.)*(5) / 2
+        return 2
 
     def get_stake(self):
-        return [(1.)*(1), (1.)*(2), 3.][self.doubled]
+        return 2**self.doubled
 
     def serialize(self):
-        return (self.score, self.soft, self.busted, self.doubled, self.n_cards, self.can_split, self.splits_remaining, self.surrendered, self.was_split)
+        return (self.trick_possible, self.suita, self.suitb, self.score, self.soft, self.busted, self.doubled, self.n_cards, self.can_split, self.splits_remaining, self.surrendered, self.was_split)
 
     def get_hash(self):
         return self.serialize()
@@ -153,15 +177,49 @@ class Hand(object):
                 h += (self.surrendered,)
             if self.n_cards == 2 and not self.surrendered and self.score != 21:
                 h += (self.can_split, self.splits_remaining, self.was_split)
+            if self.n_cards <= 3:
+                h += (self.trick_possible,)
+                if self.trick_possible:
+                    h += (self.suita, self.suitb)
 
         return h
 
     def __str__(self):
         return repr(self.serialize())
 
-cards = zip(range(1, 10), [1./13]*9) + [(10, 4./13)]
-ranks = list(cards)
+cards = [(1, (1.)*(1)/12), (2, (1.)*(1.)/12), (3, (1.)*(1.)/12), (4, (1.)*(1.)/12), (5, (1.)*(1)/12), 
+        (6, (1.)*(1)/48), (16, (1.)*(1)/48), (26, (1.)*(1)/48), (36, (1.)*(1)/48), 
+        (7, (1.)*(1)/48), (17, (1.)*(1)/48), (27, (1.)*(1)/48), (37, (1.)*(1)/48), 
+        (8, (1.)*(1)/48), (18, (1.)*(1)/48), (28, (1.)*(1)/48), (38, (1.)*(1)/48), 
+        (9, (1.)*(1)/12), (10, (1.)*(3)/12)]
+ranks = [(1, (1.)*(1)/12), (2, (1.)*(1.)/12), (3, (1.)*(1.)/12), (4, (1.)*(1.)/12), (5, (1.)*(1)/12), 
+        (6, (1.)*(1)/12), (7, (1.)*(1)/12), (8, (1.)*(1)/12), (9, (1.)*(1)/12), (10, (1.)*(3)/12)]
 
+cards = [(1, (1.)*(1)/13), (2, (1.)*(1.)/13), (3, (1.)*(1.)/13), (4, (1.)*(1.)/13), (5, (1.)*(1)/13), 
+        (6, (1.)*(1)/52), (16, (1.)*(1)/52), (26, (1.)*(1)/52), (36, (1.)*(1)/52), 
+        (7, (1.)*(1)/52), (17, (1.)*(1)/52), (27, (1.)*(1)/52), (37, (1.)*(1)/52), 
+        (8, (1.)*(1)/52), (18, (1.)*(1)/52), (28, (1.)*(1)/52), (38, (1.)*(1)/52), 
+        (9, (1.)*(1)/13), (10, (1.)*(4)/13)]
+ranks = [(1, (1.)*(1)/13), (2, (1.)*(1.)/13), (3, (1.)*(1.)/13), (4, (1.)*(1.)/13), (5, (1.)*(1)/13), 
+        (6, (1.)*(1)/13), (7, (1.)*(1)/13), (8, (1.)*(1)/13), (9, (1.)*(1)/13), (10, (1.)*(4)/13)]
+
+"""
+cards = [(1, (1.)*(1)/10), (2, (1.)*(1.)/10), (3, (1.)*(1.)/10), (4, (1.)*(1.)/10), (5, (1.)*(1)/10), 
+        (6, (1.)*(1)/40), (16, (1.)*(1)/40), (26, (1.)*(1)/40), (36, (1.)*(1)/40), 
+        (7, (1.)*(1)/40), (17, (1.)*(1)/40), (27, (1.)*(1)/40), (37, (1.)*(1)/40), 
+        (8, (1.)*(1)/40), (18, (1.)*(1)/40), (28, (1.)*(1)/40), (38, (1.)*(1)/40), 
+        (9, (1.)*(1)/10), (10, (1.)*(1)/10)]
+ranks = [(1, (1.)*(1)/10), (2, (1.)*(1.)/10), (3, (1.)*(1.)/10), (4, (1.)*(1.)/10), (5, (1.)*(1)/10), 
+        (6, (1.)*(1)/10), (7, (1.)*(1)/10), (8, (1.)*(1)/10), (9, (1.)*(1)/10), (10, (1.)*(1)/10)]
+
+cards = [(1, (1.)*(1)/11), (2, (1.)*(1.)/11), (3, (1.)*(1.)/11), (4, (1.)*(1.)/11), (5, (1.)*(1)/11), 
+        (6, (1.)*(1)/44), (16, (1.)*(1)/44), (26, (1.)*(1)/44), (36, (1.)*(1)/44), 
+        (7, (1.)*(1)/44), (17, (1.)*(1)/44), (27, (1.)*(1)/44), (37, (1.)*(1)/44), 
+        (8, (1.)*(1)/44), (18, (1.)*(1)/44), (28, (1.)*(1)/44), (38, (1.)*(1)/44), 
+        (9, (1.)*(1)/11), (10, (1.)*(2)/11)]
+ranks = [(1, (1.)*(1)/11), (2, (1.)*(1.)/11), (3, (1.)*(1.)/11), (4, (1.)*(1.)/11), (5, (1.)*(1)/11), 
+        (6, (1.)*(1)/11), (7, (1.)*(1)/11), (8, (1.)*(1)/11), (9, (1.)*(1)/11), (10, (1.)*(2)/11)]
+"""
 def showdown(dealer_card, hands, dp):
     if dealer_card not in dp:
         # Note that only the first hand can be the original bet.
@@ -179,9 +237,9 @@ def showdown(dealer_card, hands, dp):
             newprobs[0][0] = probs[0][0] # Bust index is 0, 0. Hack.
             newprobs[1][0] = probs[1][0] # Dealer blackjack index is 1, 0. Hack.
             # Hit probs
-            for tot in range(2, DEALER_STAND+1):
+            for tot in range(2, 18):
                 for soft in [0, 1]:
-                    if tot != DEALER_STAND or (soft and HIT_SOFT17):
+                    if tot != 17 or soft:
                         if probs[soft][tot]: updates += 1
                         for value, likelihood in ranks:
                             newtot = value + tot
@@ -199,9 +257,9 @@ def showdown(dealer_card, hands, dp):
                             else:
                                 newprobs[newsoft][newtot] += likelihood * probs[soft][tot]
             # stand
-            for tot in range(DEALER_STAND, 22):
+            for tot in range(17, 22):
                 for soft in [0, 1]:
-                    if tot == DEALER_STAND and soft and HIT_SOFT17:
+                    if tot == 17 and soft:
                         continue
                     newprobs[soft][tot] += probs[soft][tot]
             probs = newprobs
@@ -223,26 +281,26 @@ def showdown(dealer_card, hands, dp):
     #print probs[1][17:]
     #raw_input()
 
+    # Pay the 21's
     totev = 0
+    for i in hands:
+        if i.get_score() == 21:
+            totev += i.payout_21()
 
-    # Resolve dealer blackjack
+    # Resolve blackjack
     live_bets = 0
     live_hands = 0
-    blackjack_hands = 0
     busted_bets = 0
     surrendered_bets = 0
     for i in hands:
-        if i.has_surrendered():
-            surrendered_bets += 0.5
-        elif i.is_blackjack():
-            blackjack_hands += 1
-        elif not i.is_busted:
+        if i.doubled and i.has_surrendered():
+            surrendered_bets += 1 # only double forfeit qualifies
+        elif i.get_score() != 21:
             live_hands += 1
             live_bets += i.get_stake()
-        else:
+        if i.is_busted():
             busted_bets += i.get_stake()
     totev += surrendered_bets * dealer_blackjack_p
-    totev += blackjack_hands * dealer_blackjack_p
     if OBO: # Note: no such thing.
         if hands[0].get_score() == 21:
             totev += (live_bets) * dealer_blackjack_p
@@ -255,40 +313,29 @@ def showdown(dealer_card, hands, dp):
     elif ENHC:
         totev += 0
     
-    # Resolve dealer bust
+    # Resolve bust
     for i in hands:
-        if not i.is_busted():
+        if i.get_score() != 21 and not i.is_busted():
             if i.has_surrendered():
-                totev += i.get_stake() * 0.5 * dealer_bust_p
-                if i.get_stake() != 1:
-                    raw_input("kek")
-            elif i.is_blackjack():
-                totev += i.get_stake() * 2.5 * dealer_bust_p
+                totev += i.get_stake() * dealer_bust_p / 2
             else:
                 totev += i.get_stake() * 2 * dealer_bust_p
 
     
     # Resolve all others
-    sum_p = dealer_bust_p + dealer_blackjack_p
-    for i in range(DEALER_STAND, 22):
+    for i in range(17, 22):
         p = probs[0][i] + probs[1][i]
-        sum_p += p
         for j in hands:
             if j.has_surrendered():
-                totev += j.get_stake() * 0.5 * p
+                totev += j.get_stake() * p /2
             elif j.is_busted():
                 totev += 0
-            elif j.is_blackjack():
-                totev += j.get_stake() * 2.5 * p
             else:
-                if j.get_score() == i:
+                if j.get_score() == i and j.get_score() != 21:
                     totev += j.get_stake() * p
-                elif j.get_score() > i:
+                elif j.get_score() > i and j.get_score() != 21:
                     totev += j.get_stake() * 2 * p
     
-    if abs(sum_p-1) > 0.001:
-        print sum_p, dealer_card, hands
-        raw_input()
     return totev
         
                         
@@ -304,8 +351,8 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
         if hand_i == len(hands):
             dp[key] = (showdown(dealer_card, hands, mydp), NO_ACTION)
         else:
-            # resolve busts
-            if hands[hand_i].is_busted():
+            # resolve 21's, busts
+            if hands[hand_i].get_score() == 21 or hands[hand_i].is_busted():
                 best = (get_edge(dealer_card, hands, hand_i + 1, mydp)[0], NO_ACTION)
             else:
                 best = (-1e20, None)
@@ -325,7 +372,7 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                     tot_ev = (1.)*(0)
                     for i, likelihood in cards:
                         newhand = hands[hand_i].double(i)
-                        ev = -1 + get_edge(dealer_card, hands[:hand_i] + [newhand] + hands[hand_i+1:], hand_i, mydp)[0]
+                        ev = get_edge(dealer_card, hands[:hand_i] + [newhand] + hands[hand_i+1:], hand_i, mydp)[0] - newhand.get_stake() + hands[hand_i].get_stake()
                         tot_ev += likelihood * ev
                     best = max(best, (tot_ev, DOUBLE))
                 # try split
@@ -335,6 +382,11 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                     ev += get_edge(dealer_card, hands[:hand_i] + [split] + hands[hand_i+1:], hand_i, mydp)[0]
                     #ev = -1 + get_edge(dealer_card, hands[:hand_i] + [original, split] + hands[hand_i+1:], hand_i, mydp)[0]
                     best = max(best, (ev, SPLIT))
+                # try free split
+                """if hands[hand_i].can_split:
+                    original, split = hands[hand_i].split()
+                    ev = get_edge(dealer_card, hands[:hand_i] + [original] + hands[hand_i+1:], hand_i, mydp)[0]
+                    best = max(best, (ev, SPLIT_FREE))"""
                 # try stand
                 best = max(best, (get_edge(dealer_card, hands, hand_i + 1, mydp)[0], STAND))
                 # try surrender
@@ -342,7 +394,6 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                     newhand = hands[hand_i].surrender()
                     ev = get_edge(dealer_card, hands[:hand_i] + [newhand] + hands[hand_i+1:], hand_i + 1, mydp)[0]
                     best = max(best, (ev, SURRENDER))
-
                 s = []
                 if hands[hand_i].can_hit():
                     if hands[hand_i].soft:
@@ -372,18 +423,15 @@ def print_chart(chart, name, rng):
 if __name__ == "__main__":
     print "computing best plays and displaying borderline cases"
     totev = (1.)*(0)
-
-    count = float(raw_input("Enter true count: "))
-    for i in [2, 3, 4, 5, 6]:
-        cards[i-1] = cards[i-1][0], cards[i-1][1] - count/52./5./2
-    cards[9] = cards[9][0], cards[9][1] + count/52./2
-
     for hole, p1 in ranks:
         for c1, l1 in cards:
             for c2, l2 in cards:
                 ev = get_edge(hole, [Hand(c1).hit(c2)], 0)
                 totev += ev[0] * p1 * l1 * l2
-    print "total ev:", totev
+                if c1/10 == c2/10 == 0:
+                    print hole, (c1-1)%10+1 + (c2-1)%10+1 + (10 if c1 == 1 or c2 == 1 else 0), c1, c2, ["stand", "hit", "double", "split", "splat", "surrender"][ev[1]], ev[0], c1/10, c2/10
+        print "Done for hole card", hole
+    print "Done. Total ev:", totev
 
     print_chart(basic_strategy_hard, "Hard", range(2, 21))
     print_chart(basic_strategy_soft, "Soft", range(11, 21))

@@ -9,10 +9,10 @@ OBO = False
 OBBO = False
 BB1 = False
 ENHC = True
-DEALER_STAND = 2
 
 HIT_SOFT17 = False
-EARLY_SURRENDER = False
+EARLY_SURRENDER = True
+REDOUBLE = True
 
 NO_ACTION = -1
 STAND = 0
@@ -27,14 +27,16 @@ dp = {}
 basic_strategy_hard = [[{} for i in range(22)] for i in range(11)]
 basic_strategy_soft = [[{} for i in range(22)] for i in range(11)]
 basic_strategy_split = [[{} for i in range(11)] for i in range(11)]
+basic_strategy_double = [[{} for i in range(22)] for i in range(11)]
+basic_strategy_double_soft = [[{} for i in range(22)] for i in range(11)]
 
 class Hand(object):
-    def __init__(self, card, splits_remaining = 2, was_split = False):
+    def __init__(self, card, splits_remaining = 1, was_split = False):
         self.score = (card-1)%10 + 1
         self.soft = card == 1
         self.score += 10 * self.soft
         self.busted = False
-        self.doubled = False
+        self.doubled = 0
         self.n_cards = 1
         self.can_split = False
         self.splits_remaining = splits_remaining
@@ -53,7 +55,7 @@ class Hand(object):
         return True
 
     def can_hit(self):
-        return self.score != 21 and not self.busted and (not self.doubled or True) and (self.was_split != SPLIT_ACES or self.n_cards != 2)
+        return self.score != 21 and not self.busted and not self.doubled and (self.was_split != SPLIT_ACES or self.n_cards != 2)
 
     def hit(self, card):
         assert(int(card) == card)
@@ -78,7 +80,7 @@ class Hand(object):
 
     def can_double(self):
         # Must have at least 2 cards. 1 card is possible after splitting.
-        return self.n_cards == 2 and self.doubled == False and self.score != 21 
+        return ((self.n_cards == 2 and self.doubled == 0) or (self.n_cards == 3 and self.doubled == 1 and REDOUBLE)) and self.was_split != SPLIT_ACES
 
     def double(self, card):
         assert(int(card) == card)
@@ -96,7 +98,7 @@ class Hand(object):
             self.score -= 10
         if self.score > 21:
             self.busted = True
-        self.doubled = True
+        self.doubled += 1
         return self
 
     def surrender(self):
@@ -105,7 +107,6 @@ class Hand(object):
         return self
 
     def can_surrender(self, dealer_card):
-        return False
         if self.n_cards == 2 and self.was_split == False and dealer_card != 1:
             return True
         return False
@@ -160,6 +161,13 @@ class Hand(object):
         return repr(self.serialize())
 
 cards = zip(range(1, 10), [1./13]*9) + [(10, 4./13)]
+
+"""
+cards[1] = cards[1][0], cards[0][1] - 1./52/4
+cards[3] = cards[3][0], cards[3][1] - 2./52/4
+for i in [0, 2, 4, 5, 6, 7, 8, 9]:
+    cards[i] = cards[i][0], cards[i][1] + 3./52/4/8
+   """ 
 ranks = list(cards)
 
 def showdown(dealer_card, hands, dp):
@@ -179,9 +187,9 @@ def showdown(dealer_card, hands, dp):
             newprobs[0][0] = probs[0][0] # Bust index is 0, 0. Hack.
             newprobs[1][0] = probs[1][0] # Dealer blackjack index is 1, 0. Hack.
             # Hit probs
-            for tot in range(2, DEALER_STAND+1):
+            for tot in range(2, 18):
                 for soft in [0, 1]:
-                    if tot != DEALER_STAND or (soft and HIT_SOFT17):
+                    if tot != 17 or (soft and HIT_SOFT17):
                         if probs[soft][tot]: updates += 1
                         for value, likelihood in ranks:
                             newtot = value + tot
@@ -199,9 +207,9 @@ def showdown(dealer_card, hands, dp):
                             else:
                                 newprobs[newsoft][newtot] += likelihood * probs[soft][tot]
             # stand
-            for tot in range(DEALER_STAND, 22):
+            for tot in range(17, 22):
                 for soft in [0, 1]:
-                    if tot == DEALER_STAND and soft and HIT_SOFT17:
+                    if tot == 17 and soft and HIT_SOFT17:
                         continue
                     newprobs[soft][tot] += probs[soft][tot]
             probs = newprobs
@@ -270,7 +278,7 @@ def showdown(dealer_card, hands, dp):
     
     # Resolve all others
     sum_p = dealer_bust_p + dealer_blackjack_p
-    for i in range(DEALER_STAND, 22):
+    for i in range(17, 22):
         p = probs[0][i] + probs[1][i]
         sum_p += p
         for j in hands:
@@ -319,6 +327,8 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                         newhand = hands[hand_i].hit(i)
                         ev = get_edge(dealer_card, hands[:hand_i] + [newhand] + hands[hand_i+1:], hand_i, mydp)[0]
                         tot_ev += likelihood * ev
+                    if hands[hand_i].score == 5 and dealer_card == 5 and hands[hand_i].doubled==0:
+                        print tot_ev, HIT
                     best = max(best, (tot_ev, HIT))
                 # try double
                 if hands[hand_i].can_double():
@@ -327,6 +337,9 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                         newhand = hands[hand_i].double(i)
                         ev = -1 + get_edge(dealer_card, hands[:hand_i] + [newhand] + hands[hand_i+1:], hand_i, mydp)[0]
                         tot_ev += likelihood * ev
+                    if hands[hand_i].score == 5 and dealer_card == 5 and hands[hand_i].doubled == 0:
+                        print tot_ev, DOUBLE
+                        raw_input()
                     best = max(best, (tot_ev, DOUBLE))
                 # try split
                 if hands[hand_i].can_split:
@@ -344,13 +357,19 @@ def get_edge(dealer_card, hands, hand_i, mydp = None):
                     best = max(best, (ev, SURRENDER))
 
                 s = []
-                if hands[hand_i].can_hit():
-                    if hands[hand_i].soft:
-                        s.append(basic_strategy_soft[dealer_card][hands[hand_i].get_score()])
-                    if hands[hand_i].can_split:
-                        s.append(basic_strategy_split[dealer_card][hands[hand_i].get_score()/2 if not hands[hand_i].soft else 1])
-                    if not hands[hand_i].soft and best[1] != SPLIT and best[1] != SPLIT_FREE:
-                        s.append(basic_strategy_hard[dealer_card][hands[hand_i].get_score()])
+                if hands[hand_i].can_hit() or hands[hand_i].can_double():
+                    if hands[hand_i].doubled == 1:
+                        if hands[hand_i].soft:
+                            s.append(basic_strategy_double_soft[dealer_card][hands[hand_i].get_score()])
+                        else:
+                            s.append(basic_strategy_double[dealer_card][hands[hand_i].get_score()])
+                    else:
+                        if hands[hand_i].soft:
+                            s.append(basic_strategy_soft[dealer_card][hands[hand_i].get_score()])
+                        if hands[hand_i].can_split:
+                            s.append(basic_strategy_split[dealer_card][hands[hand_i].get_score()/2 if not hands[hand_i].soft else 1])
+                        if not hands[hand_i].soft and best[1] != SPLIT and best[1] != SPLIT_FREE:
+                            s.append(basic_strategy_hard[dealer_card][hands[hand_i].get_score()])
                     for i in s:
                         i[best[1]] = i.get(best[1], 0) + 1
 
@@ -365,29 +384,28 @@ def print_chart(chart, name, rng):
     for i in rng:
         print i, "\t",
         for j in range(2, 11) + [1]:
-            print ",".join(map(lambda a: ['s','h','d','p','P','r'][a],chart[j][i].keys())), "\t",
+            print ",".join(map(lambda a: ['s','h','d','p','P','r'][a] + str(chart[j][i][a]),chart[j][i].keys())), "\t",
         print
     print
 
 if __name__ == "__main__":
     print "computing best plays and displaying borderline cases"
     totev = (1.)*(0)
-
-    count = float(raw_input("Enter true count: "))
-    for i in [2, 3, 4, 5, 6]:
-        cards[i-1] = cards[i-1][0], cards[i-1][1] - count/52./5./2
-    cards[9] = cards[9][0], cards[9][1] + count/52./2
-
     for hole, p1 in ranks:
         for c1, l1 in cards:
             for c2, l2 in cards:
                 ev = get_edge(hole, [Hand(c1).hit(c2)], 0)
                 totev += ev[0] * p1 * l1 * l2
-    print "total ev:", totev
+                if c1/10 == c2/10 == 0:
+                    print hole, (c1-1)%10+1 + (c2-1)%10+1 + (10 if c1 == 1 or c2 == 1 else 0), c1, c2, ["stand", "hit", "double", "split", "splat", "surrender"][ev[1]], ev[0], c1/10, c2/10
+        print "Done for hole card", hole
+    print "Done. Total ev:", totev
 
     print_chart(basic_strategy_hard, "Hard", range(2, 21))
     print_chart(basic_strategy_soft, "Soft", range(11, 21))
     print_chart(basic_strategy_split, "Splits", range(2, 11) + [1])
+    print_chart(basic_strategy_double, "Redouble", range(2, 21))
+    print_chart(basic_strategy_double_soft, "Redouble soft", range(2, 21))
 
     cardA = int(raw_input("first player card:"))
     h = Hand(cardA)
